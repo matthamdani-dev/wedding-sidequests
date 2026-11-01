@@ -1,18 +1,34 @@
 openapi: 3.1.0
 info:
   title: Wedding Missions API
-  version: 0.1.0
+  version: 0.3.0
   description: >
     HTTP API for the wedding missions app. All routes live under `/api` and are
     served by Next.js route handlers backed by Supabase Postgres
     (`lib/server/wedding-repository.js`).
 
 
-    **Not yet implemented** (tracked separately): guest session auth
-    (last-4-digits name claim -> signed cookie), photo upload signed URLs, and
-    the `/api/admin/*` backoffice (CSV import, moderation). `guestId` is
-    currently taken from the request body; step 3 moves it to the session
-    cookie.
+    **Guest auth**: no email/password. A guest picks their name (`GET
+    /api/guests`), then claims it with their room number (`POST
+    /api/guests/{id}/claim`). On success the server issues a signed, httpOnly
+    `guest_session` cookie; `GET /api/me` resumes a returning guest from it.
+    Submitting (`POST /api/submissions`), uploading (`POST /api/uploads`), and
+    saving deck progress (`PUT /api/me/progress`) all require this cookie —
+    there is no unverified path into any of them. A guest who skips
+    verification ("continue as guest" in the UI) can browse but not submit.
+
+
+    **Admin auth**: a single shared login (`POST /api/admin/login`,
+    `ADMIN_USERNAME` + bcrypt `ADMIN_PASSWORD_HASH`) issues a separate,
+    unrelated `admin_session` cookie. Every `/api/admin/*` route below
+    requires it. No per-admin accounts — see docs/DATABASE.md.
+
+
+    **Not yet implemented**: CSV import for guests/missions (use the
+    admin CRUD endpoints below, or `npm run db:seed` for local bulk fixtures)
+    and real-time wall updates.
+  license:
+    name: UNLICENSED
 servers:
   - url: /
     description: Same origin as the docs page
@@ -23,6 +39,8 @@ tags:
   - name: System
   - name: Missions
   - name: Guests
+  - name: Admin
+  - name: Session
   - name: Wall
   - name: Leaderboard
 
@@ -89,7 +107,10 @@ paths:
   /api/guests/{id}:
     get:
       tags: [Guests]
-      summary: Viewer bootstrap — guest record, score, and deck position
+      summary: Public guest lookup — record, score, and deck position
+      description: >
+        No auth required; used to show a guest's basic info before they've
+        claimed their name. Does not require or imply a session.
       parameters:
         - $ref: "#/components/parameters/GuestId"
       responses:
@@ -110,12 +131,101 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
 
-  /api/guests/{id}/progress:
-    put:
-      tags: [Guests]
-      summary: Save the guest's position in the mission deck
+  /api/guests/{id}/claim:
+    post:
+      tags: [Session]
+      summary: Verify a guest's room number and claim their name
+      description: >
+        Checks `roomNumber` against the guest's `room_number`. On success,
+        sets the `guest_session` cookie (httpOnly, ~72h) and returns the same
+        bootstrap shape as `GET /api/me`, so the client can enter the game
+        immediately without a second request. Not device-locked — claiming
+        from a second device with the correct room number issues it its own
+        valid session.
+
+
+        Throttled: 20 failed attempts locks the guest for 2 hours
+        (`401` while guessing, `429` once locked).
       parameters:
         - $ref: "#/components/parameters/GuestId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [roomNumber]
+              properties:
+                roomNumber:
+                  type: string
+                  description: Matched case-insensitively, trimmed.
+                  example: "214"
+      responses:
+        "200":
+          description: Verified — session cookie set
+          headers:
+            Set-Cookie:
+              schema: { type: string }
+              description: guest_session=...; HttpOnly; SameSite=Lax; Max-Age=259200
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [guest, score, progress]
+                properties:
+                  guest: { $ref: "#/components/schemas/GuestWithClaim" }
+                  score: { $ref: "#/components/schemas/Score" }
+                  progress: { $ref: "#/components/schemas/Progress" }
+        "400":
+          description: Missing roomNumber or invalid JSON
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "401":
+          description: Room number doesn't match
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "404":
+          description: No guest with that id
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "429":
+          description: Too many failed attempts — locked for 2 hours
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /api/me:
+    get:
+      tags: [Session]
+      summary: Resume a returning, already-claimed guest
+      description: Reads the guest_session cookie. Used on app load to skip straight to the game screen without re-verifying.
+      security: [{ guestSession: [] }]
+      responses:
+        "200":
+          description: Valid session
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [guest, score, progress]
+                properties:
+                  guest: { $ref: "#/components/schemas/GuestWithClaim" }
+                  score: { $ref: "#/components/schemas/Score" }
+                  progress: { $ref: "#/components/schemas/Progress" }
+        "401":
+          description: Missing, expired, forged, or invalidated session (e.g. after an admin claim reset)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /api/me/progress:
+    put:
+      tags: [Session]
+      summary: Save the current session's position in the mission deck
+      security: [{ guestSession: [] }]
       requestBody:
         required: true
         content:
@@ -142,6 +252,29 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
+        "401":
+          description: No valid session
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /api/me/logout:
+    post:
+      tags: [Session]
+      summary: Clear the session cookie
+      responses:
+        "200":
+          description: Logged out
+          headers:
+            Set-Cookie:
+              schema: { type: string }
+              description: guest_session=; Max-Age=0
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean, example: true }
 
   /api/posts:
     get:
@@ -168,23 +301,21 @@ paths:
       tags: [Wall]
       summary: Submit a mission answer
       description: >
-        Creates a submission with `status = 'pending'`. Points count toward the
-        guest's total immediately (the leaderboard sums everything not
-        rejected); an admin rejection later deducts them. `body` is required for
-        `text` missions, `mediaUrl` for `photo` missions.
+        Requires a valid guest_session cookie — the guest id is taken from
+        the session, never from the request body. Creates a submission with
+        `status = 'pending'`. Points count toward the guest's total
+        immediately (the leaderboard sums everything not rejected); an admin
+        rejection later deducts them. `body` is required for `text` missions,
+        `mediaUrl` for `photo` missions.
+      security: [{ guestSession: [] }]
       requestBody:
         required: true
         content:
           application/json:
             schema:
               type: object
-              required: [guestId, missionId]
+              required: [missionId]
               properties:
-                guestId:
-                  type: string
-                  description: >
-                    Currently supplied by the client. Step 3 will derive this
-                    from the signed guest session cookie and ignore the body.
                 missionId: { type: integer }
                 body:
                   type: [string, "null"]
@@ -209,9 +340,12 @@ paths:
                   submission: { $ref: "#/components/schemas/SubmissionResult" }
                   score: { $ref: "#/components/schemas/Score" }
         "400":
-          description: >
-            Invalid JSON, missing/unknown guest, unknown or inactive mission, or
-            missing content for the mission kind.
+          description: Invalid JSON, unknown or inactive mission, or missing content for the mission kind.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "401":
+          description: No valid session — guest hasn't verified their name
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
@@ -241,7 +375,496 @@ paths:
                     type: array
                     items: { $ref: "#/components/schemas/LeaderboardEntry" }
 
+  /api/uploads:
+    post:
+      tags: [Wall]
+      summary: Get a signed upload URL for wall photo/video proof
+      description: >
+        Requires a guest session. Validates contentType against an allowlist
+        and sizeBytes against a cap (15MB photo / 60MB video) before ever
+        contacting Supabase Storage. The client then PUTs the file directly
+        to `uploadUrl` and submits the returned `publicUrl` as `mediaUrl` on
+        `POST /api/submissions`.
+      security: [{ guestSession: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [filename, contentType, sizeBytes]
+              properties:
+                filename: { type: string, example: photo.jpg }
+                contentType:
+                  type: string
+                  enum: [image/jpeg, image/png, image/webp, image/heic, video/mp4, video/quicktime]
+                sizeBytes: { type: integer, example: 2400000 }
+      responses:
+        "201":
+          description: Signed upload target
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [uploadUrl, path, publicUrl]
+                properties:
+                  uploadUrl: { type: string, description: One-time signed PUT URL. }
+                  path: { type: string }
+                  token: { type: string }
+                  publicUrl: { type: string, description: Stable public URL, valid once the PUT completes. }
+        "400":
+          description: Unsupported type, missing/oversized file
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "401":
+          description: No valid session
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "500":
+          description: Storage not configured, or Supabase error
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  # --- Admin -----------------------------------------------------------
+  /api/admin/login:
+    post:
+      tags: [Admin]
+      summary: Admin sign-in
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [username, password]
+              properties:
+                username: { type: string }
+                password: { type: string }
+      responses:
+        "200":
+          description: Signed in — admin_session cookie set
+          headers:
+            Set-Cookie: { schema: { type: string } }
+          content:
+            application/json:
+              schema: { type: object, properties: { ok: { type: boolean } } }
+        "401":
+          description: Incorrect username or password
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /api/admin/logout:
+    post:
+      tags: [Admin]
+      summary: Admin sign-out
+      responses:
+        "200":
+          description: Cookie cleared
+          content:
+            application/json:
+              schema: { type: object, properties: { ok: { type: boolean } } }
+
+  /api/admin/missions:
+    get:
+      tags: [Admin]
+      summary: List all missions (including inactive)
+      security: [{ adminSession: [] }]
+      responses:
+        "200":
+          description: All missions
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  missions: { type: array, items: { $ref: "#/components/schemas/AdminMission" } }
+        "401": { $ref: "#/components/responses/AdminAuthRequired" }
+    post:
+      tags: [Admin]
+      summary: Create a mission
+      security: [{ adminSession: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AdminMissionInput" }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: { type: object, properties: { mission: { $ref: "#/components/schemas/AdminMission" } } }
+        "400":
+          description: Validation error
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "401": { $ref: "#/components/responses/AdminAuthRequired" }
+
+  /api/admin/missions/{id}:
+    put:
+      tags: [Admin]
+      summary: Update a mission (partial)
+      security: [{ adminSession: [] }]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: integer }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AdminMissionInput" }
+      responses:
+        "200":
+          description: Updated
+          content:
+            application/json:
+              schema: { type: object, properties: { mission: { $ref: "#/components/schemas/AdminMission" } } }
+        "400":
+          description: Validation error
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "401": { $ref: "#/components/responses/AdminAuthRequired" }
+        "404":
+          description: Mission not found
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+    delete:
+      tags: [Admin]
+      summary: Delete a mission
+      description: >
+        409 if submissions already reference this mission (FK
+        ON DELETE RESTRICT) — mark it inactive via PUT instead.
+      security: [{ adminSession: [] }]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: integer }
+      responses:
+        "200":
+          description: Deleted
+          content:
+            application/json:
+              schema: { type: object, properties: { ok: { type: boolean } } }
+        "401": { $ref: "#/components/responses/AdminAuthRequired" }
+        "404":
+          description: Mission not found
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "409":
+          description: Mission has existing submissions
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /api/admin/guests:
+    get:
+      tags: [Admin]
+      summary: List/search all guests (admin fields, up to 200)
+      security: [{ adminSession: [] }]
+      parameters:
+        - name: q
+          in: query
+          schema: { type: string }
+      responses:
+        "200":
+          description: Guests
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  guests: { type: array, items: { $ref: "#/components/schemas/AdminGuest" } }
+        "401": { $ref: "#/components/responses/AdminAuthRequired" }
+    post:
+      tags: [Admin]
+      summary: Create a guest
+      security: [{ adminSession: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AdminGuestInput" }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: { type: object, properties: { guest: { $ref: "#/components/schemas/AdminGuest" } } }
+        "400":
+          description: Validation error
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "401": { $ref: "#/components/responses/AdminAuthRequired" }
+
+  /api/admin/guests/{id}:
+    put:
+      tags: [Admin]
+      summary: Update a guest (partial)
+      security: [{ adminSession: [] }]
+      parameters:
+        - $ref: "#/components/parameters/GuestId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AdminGuestInput" }
+      responses:
+        "200":
+          description: Updated
+          content:
+            application/json:
+              schema: { type: object, properties: { guest: { $ref: "#/components/schemas/AdminGuest" } } }
+        "401": { $ref: "#/components/responses/AdminAuthRequired" }
+        "404":
+          description: Guest not found
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+    delete:
+      tags: [Admin]
+      summary: Delete a guest
+      description: Cascades to their submissions and progress (ON DELETE CASCADE) — irreversible.
+      security: [{ adminSession: [] }]
+      parameters:
+        - $ref: "#/components/parameters/GuestId"
+      responses:
+        "200":
+          description: Deleted
+          content:
+            application/json:
+              schema: { type: object, properties: { ok: { type: boolean } } }
+        "401": { $ref: "#/components/responses/AdminAuthRequired" }
+        "404":
+          description: Guest not found
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /api/admin/guests/{id}/reset-claim:
+    post:
+      tags: [Admin]
+      summary: Invalidate a guest's outstanding session cookies
+      description: Bumps session_epoch and clears claimed_at so they can re-verify from scratch.
+      security: [{ adminSession: [] }]
+      parameters:
+        - $ref: "#/components/parameters/GuestId"
+      responses:
+        "200":
+          description: Reset
+          content:
+            application/json:
+              schema: { type: object, properties: { ok: { type: boolean } } }
+        "401": { $ref: "#/components/responses/AdminAuthRequired" }
+        "404":
+          description: Guest not found
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /api/admin/guests/{id}/points:
+    get:
+      tags: [Admin]
+      summary: Points-adjustment history for a guest
+      security: [{ adminSession: [] }]
+      parameters:
+        - $ref: "#/components/parameters/GuestId"
+      responses:
+        "200":
+          description: History
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  adjustments: { type: array, items: { $ref: "#/components/schemas/PointAdjustment" } }
+        "401": { $ref: "#/components/responses/AdminAuthRequired" }
+    post:
+      tags: [Admin]
+      summary: Grant (or deduct) bonus points
+      description: Always requires a note explaining why. Use a negative points value to correct a mistake.
+      security: [{ adminSession: [] }]
+      parameters:
+        - $ref: "#/components/parameters/GuestId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [points, note]
+              properties:
+                points: { type: integer, example: 15 }
+                note: { type: string, example: Best dressed at the reception }
+      responses:
+        "201":
+          description: Recorded
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  adjustment: { $ref: "#/components/schemas/PointAdjustment" }
+                  score: { $ref: "#/components/schemas/Score" }
+        "400":
+          description: Missing/invalid points or note
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "401": { $ref: "#/components/responses/AdminAuthRequired" }
+
+  /api/admin/submissions:
+    get:
+      tags: [Admin]
+      summary: List submissions for moderation
+      security: [{ adminSession: [] }]
+      parameters:
+        - name: status
+          in: query
+          schema: { type: string, enum: [pending, approved, rejected] }
+          description: Omit to list all statuses.
+      responses:
+        "200":
+          description: Submissions, newest first, up to 300
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  submissions: { type: array, items: { $ref: "#/components/schemas/AdminSubmission" } }
+        "401": { $ref: "#/components/responses/AdminAuthRequired" }
+
+  /api/admin/submissions/{id}:
+    patch:
+      tags: [Admin]
+      summary: Approve or reject one submission
+      description: >
+        This is the swipe-card action. Rejecting deducts the guest's points
+        (guest_scores excludes status = 'rejected').
+      security: [{ adminSession: [] }]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [status]
+              properties:
+                status: { type: string, enum: [pending, approved, rejected] }
+      responses:
+        "200":
+          description: Updated
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  id: { type: string, format: uuid }
+                  guestId: { type: string }
+        "400":
+          description: Invalid status
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "401": { $ref: "#/components/responses/AdminAuthRequired" }
+        "404":
+          description: Submission not found
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+    delete:
+      tags: [Admin]
+      summary: Permanently delete a submission
+      description: Best-effort removes the uploaded file from Storage too.
+      security: [{ adminSession: [] }]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200":
+          description: Deleted
+          content:
+            application/json:
+              schema: { type: object, properties: { ok: { type: boolean } } }
+        "401": { $ref: "#/components/responses/AdminAuthRequired" }
+        "404":
+          description: Submission not found
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /api/admin/submissions/bulk:
+    post:
+      tags: [Admin]
+      summary: Approve or reject many submissions at once
+      description: >
+        Omit ids (or send an empty array) with status "approved" to approve
+        every pending submission — the "Approve all pending" button.
+      security: [{ adminSession: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [status]
+              properties:
+                status: { type: string, enum: [pending, approved, rejected] }
+                ids:
+                  type: array
+                  items: { type: string, format: uuid }
+                  description: Omit to target every pending submission.
+      responses:
+        "200":
+          description: Count of rows updated
+          content:
+            application/json:
+              schema: { type: object, properties: { count: { type: integer } } }
+        "400":
+          description: Invalid status
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "401": { $ref: "#/components/responses/AdminAuthRequired" }
+
 components:
+  securitySchemes:
+    guestSession:
+      type: apiKey
+      in: cookie
+      name: guest_session
+      description: Signed, httpOnly cookie set by POST /api/guests/{id}/claim.
+    adminSession:
+      type: apiKey
+      in: cookie
+      name: admin_session
+      description: Signed, httpOnly cookie set by POST /api/admin/login. Unrelated to guest_session.
+
+  responses:
+    AdminAuthRequired:
+      description: No valid admin_session cookie
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+
   parameters:
     GuestId:
       name: id
@@ -272,7 +895,7 @@ components:
             claimedAt:
               type: [string, "null"]
               format: date-time
-              description: When the guest verified their name, or null if unclaimed.
+              description: When the guest verified their room number, or null if unclaimed.
 
     Mission:
       type: object
@@ -357,3 +980,80 @@ components:
           type: array
           items: { type: string }
           description: Present on some validation errors.
+
+    AdminMission:
+      type: object
+      required: [id, kicker, title, points, kind, color, sortOrder, active]
+      properties:
+        id: { type: integer, example: 1 }
+        kicker: { type: string }
+        title: { type: string }
+        note: { type: [string, "null"] }
+        points: { type: integer }
+        kind: { type: string, enum: [photo, text] }
+        color: { type: string, enum: [coral, butter, blue, sage, lilac, rose] }
+        sortOrder: { type: integer }
+        active: { type: boolean }
+
+    AdminMissionInput:
+      type: object
+      description: All fields optional on PUT (partial update); all required on POST.
+      properties:
+        kicker: { type: string }
+        title: { type: string }
+        note: { type: [string, "null"] }
+        points: { type: integer, minimum: 0 }
+        kind: { type: string, enum: [photo, text] }
+        color: { type: string, enum: [coral, butter, blue, sage, lilac, rose] }
+        sortOrder: { type: integer }
+        active: { type: boolean }
+
+    AdminGuest:
+      type: object
+      required: [id, name, roomNumber, table, relation, from, claimedAt]
+      properties:
+        id: { type: string }
+        name: { type: string }
+        roomNumber: { type: [string, "null"] }
+        table: { type: [string, "null"] }
+        relation: { type: [string, "null"] }
+        from: { type: [string, "null"] }
+        claimedAt: { type: [string, "null"], format: date-time }
+
+    AdminGuestInput:
+      type: object
+      description: All fields optional on PUT (partial update); name required on POST.
+      properties:
+        name: { type: string }
+        roomNumber: { type: [string, "null"] }
+        table: { type: [string, "null"] }
+        relation: { type: [string, "null"] }
+        from: { type: [string, "null"] }
+
+    PointAdjustment:
+      type: object
+      required: [id, points, note, created_at]
+      properties:
+        id: { type: string, format: uuid }
+        points: { type: integer, example: 15 }
+        note: { type: string, example: Best dressed at the reception }
+        created_at: { type: string, format: date-time }
+
+    AdminSubmission:
+      type: object
+      required: [id, status, points, mission, tone, guestId, guestName, initials, createdAt]
+      properties:
+        id: { type: string, format: uuid }
+        status: { type: string, enum: [pending, approved, rejected] }
+        body: { type: [string, "null"] }
+        mediaUrl: { type: [string, "null"] }
+        mediaType: { type: [string, "null"] }
+        points: { type: integer }
+        mission: { type: string, description: The mission's kicker. }
+        tone: { type: string, description: The mission's color. }
+        guestId: { type: string }
+        guestName: { type: string }
+        guestTable: { type: [string, "null"] }
+        initials: { type: string }
+        createdAt: { type: string, format: date-time }
+        reviewedAt: { type: [string, "null"], format: date-time }

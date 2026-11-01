@@ -6,15 +6,15 @@
 import { guests, missions } from "../lib/data/wedding-data.js";
 import { createClient } from "./client.mjs";
 
-// wedding-data.js has no phone numbers; supply demo ones here so the
-// "last 4 digits" claim check has something to verify against.
-const demoPhoneLast4 = {
-  "guest-nadya": "0111",
-  "guest-matthew": "0222",
-  "guest-bride-test": "0333",
-  "guest-alex": "0444",
-  "guest-sophie": "0555",
-  "guest-daniel": "0666",
+// wedding-data.js has no room numbers; supply demo ones here so the claim
+// check (guest enters their room number) has something to verify against.
+const demoRoomNumbers = {
+  "guest-nadya": "101",
+  "guest-matthew": "101",
+  "guest-bride-test": "102",
+  "guest-alex": "205",
+  "guest-sophie": "210",
+  "guest-daniel": "214",
 };
 
 const sql = createClient();
@@ -48,19 +48,16 @@ try {
 
     // --- guests -------------------------------------------------------
     for (const g of guests) {
-      const last4 = demoPhoneLast4[g.id] ?? null;
-      // phone_last4 is a generated column, so store a placeholder full
-      // number ending in the demo digits.
-      const phone = last4 ? `+000000${last4}` : null;
+      const roomNumber = demoRoomNumbers[g.id] ?? null;
       await tx`
-        INSERT INTO guests (id, name, phone, "table", relation, hometown)
-        VALUES (${g.id}, ${g.name}, ${phone}, ${g.table}, ${g.relation}, ${g.from})
+        INSERT INTO guests (id, name, room_number, "table", relation, hometown)
+        VALUES (${g.id}, ${g.name}, ${roomNumber}, ${g.table}, ${g.relation}, ${g.from})
         ON CONFLICT (id) DO UPDATE SET
-          name     = EXCLUDED.name,
-          phone    = EXCLUDED.phone,
-          "table"  = EXCLUDED."table",
-          relation = EXCLUDED.relation,
-          hometown = EXCLUDED.hometown
+          name        = EXCLUDED.name,
+          room_number = EXCLUDED.room_number,
+          "table"     = EXCLUDED."table",
+          relation    = EXCLUDED.relation,
+          hometown    = EXCLUDED.hometown
       `;
     }
 

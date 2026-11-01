@@ -32,15 +32,27 @@ function initials(name) {
 
 export default function WeddingMissions() {
   const reduceMotion = useReducedMotion();
+  const [bootstrapping, setBootstrapping] = useState(true);
   const [screen, setScreen] = useState("welcome");
   const [tab, setTab] = useState("missions");
   const [query, setQuery] = useState("");
   const [results, setResults] = useState([]);
   const [selectedGuest, setSelectedGuest] = useState(null);
+  const [verified, setVerified] = useState(false);
+  const [roomNumber, setRoomNumber] = useState("");
+  const [verifyError, setVerifyError] = useState("");
+  const [claiming, setClaiming] = useState(false);
   const [missions, setMissions] = useState([]);
   const [missionIndex, setMissionIndex] = useState(0);
   const [answer, setAnswer] = useState("");
   const [uploadName, setUploadName] = useState("");
+  // Upload lifecycle for the current photo mission's file: "idle" (nothing
+  // picked), "uploading", "done" (mediaUrl/mediaType below are ready to
+  // submit), or "error" (uploadError has the message, submit stays blocked).
+  const [uploadState, setUploadState] = useState("idle");
+  const [uploadError, setUploadError] = useState("");
+  const [mediaUrl, setMediaUrl] = useState(null);
+  const [mediaType, setMediaType] = useState(null);
   const [points, setPoints] = useState(0);
   const [pendingCount, setPendingCount] = useState(0);
   const [posts, setPosts] = useState([]);
@@ -49,6 +61,20 @@ export default function WeddingMissions() {
   const [toast, setToast] = useState("");
   const [profile, setProfile] = useState({ relation: "Friend of the happy couple", from: "Jakarta" });
   const fileRef = useRef(null);
+
+  // --- Resume a returning, already-claimed guest from the session cookie ---
+  useEffect(() => {
+    fetch("/api/me")
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data) => {
+        if (!data) return;
+        applyBootstrap(data);
+        setVerified(true);
+        setScreen("game");
+      })
+      .catch(() => {})
+      .finally(() => setBootstrapping(false));
+  }, []);
 
   // --- Card deck -------------------------------------------------------
   useEffect(() => {
@@ -102,59 +128,95 @@ export default function WeddingMissions() {
       .catch(() => {});
   }, [tab]);
 
-  // --- Persist deck position (server + offline cache) --------------
+  // --- Persist deck position (server for verified guests + offline cache) ---
   useEffect(() => {
     saveProgress({ points, missionIndex });
-    if (!selectedGuest?.id) return;
+    if (!verified) return;
     const timer = setTimeout(() => {
-      fetch(`/api/guests/${selectedGuest.id}/progress`, {
+      fetch("/api/me/progress", {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ missionIndex }),
       }).catch(() => {});
     }, 400);
     return () => clearTimeout(timer);
-  }, [missionIndex, points, selectedGuest?.id]);
+  }, [missionIndex, points, verified]);
 
   const mission = useMemo(
     () => (missions.length ? missions[missionIndex % missions.length] : null),
     [missions, missionIndex],
   );
 
-  async function enterGame(guest) {
+  function applyBootstrap(data) {
+    setSelectedGuest(data.guest);
+    setProfile({ relation: data.guest.relation || "Guest", from: data.guest.from || "" });
+    setPoints(data.score?.points || 0);
+    setPendingCount(data.score?.pendingCount || 0);
+    setMissionIndex(data.progress?.missionIndex || 0);
+  }
+
+  // Unverified path only ("Continue as guest") — no claim, no session, read-only.
+  function enterAsGuest(guest) {
     setSelectedGuest(guest);
     setProfile({ relation: guest.relation || "Guest", from: guest.from || "" });
+    setVerified(false);
     setScreen("game");
-
-    if (!guest?.id) {
-      const cached = loadProgress();
-      if (cached) {
-        setPoints(cached.points || 0);
-        setMissionIndex(cached.missionIndex || 0);
-      }
-      return;
+    const cached = loadProgress();
+    if (cached) {
+      setPoints(cached.points || 0);
+      setMissionIndex(cached.missionIndex || 0);
     }
+  }
 
+  async function claimGuest() {
+    if (!selectedGuest?.id || claiming) return;
+    setClaiming(true);
+    setVerifyError("");
     try {
-      const res = await fetch(`/api/guests/${guest.id}`);
-      if (!res.ok) throw new Error("bootstrap failed");
+      const res = await fetch(`/api/guests/${selectedGuest.id}/claim`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ roomNumber }),
+      });
       const data = await res.json();
-      setPoints(data.score?.points || 0);
-      setPendingCount(data.score?.pendingCount || 0);
-      setMissionIndex(data.progress?.missionIndex || 0);
-    } catch {
-      const cached = loadProgress();
-      if (cached) {
-        setPoints(cached.points || 0);
-        setMissionIndex(cached.missionIndex || 0);
+      if (!res.ok) {
+        setVerifyError(data.error || "Could not verify");
+        return;
       }
+      applyBootstrap(data);
+      setVerified(true);
+      setRoomNumber("");
+      setScreen("game");
+    } catch {
+      setVerifyError("Network hiccup — try again");
+    } finally {
+      setClaiming(false);
     }
+  }
+
+  async function switchGuest() {
+    try {
+      await fetch("/api/me/logout", { method: "POST" });
+    } catch {
+      // Ignore — the cookie will just expire on its own.
+    }
+    setVerified(false);
+    setSelectedGuest(null);
+    setPoints(0);
+    setPendingCount(0);
+    setMissionIndex(0);
+    setQuery("");
+    setScreen("welcome");
   }
 
   function nextMission() {
     setMissionIndex((value) => (missions.length ? (value + 1) % missions.length : 0));
     setAnswer("");
     setUploadName("");
+    setUploadState("idle");
+    setUploadError("");
+    setMediaUrl(null);
+    setMediaType(null);
   }
 
   function showToast(message) {
@@ -164,8 +226,11 @@ export default function WeddingMissions() {
 
   async function submitMission() {
     if (!mission || submitting) return;
-    if (!selectedGuest?.id) return showToast("Find your name first to play");
+    if (!verified) return showToast("Verify your name first to play");
     if (mission.kind === "photo" && !uploadName) return showToast("Add a photo first");
+    if (mission.kind === "photo" && uploadState === "uploading") return showToast("Hang on, still uploading…");
+    if (mission.kind === "photo" && uploadState === "error") return showToast(uploadError || "Upload failed — try again");
+    if (mission.kind === "photo" && uploadState !== "done") return showToast("Add a photo first");
     if (mission.kind === "text" && !answer.trim()) return showToast("Write your answer first");
 
     setSubmitting(true);
@@ -174,11 +239,10 @@ export default function WeddingMissions() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          guestId: selectedGuest.id,
           missionId: mission.id,
           body: mission.kind === "text" ? answer.trim() : null,
-          // TODO(step 4): upload the file to storage and send the real URL.
-          mediaUrl: mission.kind === "photo" ? `pending-upload:${uploadName}` : null,
+          mediaUrl: mission.kind === "photo" ? mediaUrl : null,
+          mediaType: mission.kind === "photo" ? mediaType : null,
         }),
       });
       const data = await res.json();
@@ -197,9 +261,71 @@ export default function WeddingMissions() {
     }
   }
 
-  function onFile(event) {
+  const ALLOWED_UPLOAD_TYPES = [
+    "image/jpeg",
+    "image/png",
+    "image/webp",
+    "image/heic",
+    "video/mp4",
+    "video/quicktime",
+  ];
+  const MAX_PHOTO_BYTES = 15 * 1024 * 1024;
+  const MAX_VIDEO_BYTES = 60 * 1024 * 1024;
+
+  async function onFile(event) {
     const file = event.target.files?.[0];
-    if (file) setUploadName(file.name);
+    event.target.value = "";
+    if (!file) return;
+
+    if (!ALLOWED_UPLOAD_TYPES.includes(file.type)) {
+      showToast("That file type isn't supported — use a photo or short video");
+      return;
+    }
+    const isVideo = file.type.startsWith("video/");
+    const maxBytes = isVideo ? MAX_VIDEO_BYTES : MAX_PHOTO_BYTES;
+    if (file.size > maxBytes) {
+      showToast(isVideo ? "Video is too large (max 60MB)" : "Photo is too large (max 15MB)");
+      return;
+    }
+
+    setUploadName(file.name);
+    setUploadState("uploading");
+    setUploadError("");
+    setMediaUrl(null);
+    setMediaType(null);
+
+    try {
+      const res = await fetch("/api/uploads", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          filename: file.name,
+          contentType: file.type,
+          sizeBytes: file.size,
+        }),
+      });
+      const target = await res.json();
+      if (!res.ok) throw new Error(target.error || "Could not start upload");
+
+      const putRes = await fetch(target.uploadUrl, {
+        method: "PUT",
+        headers: { "Content-Type": file.type },
+        body: file,
+      });
+      if (!putRes.ok) throw new Error("Upload failed — try again");
+
+      setMediaUrl(target.publicUrl);
+      setMediaType(file.type);
+      setUploadState("done");
+    } catch (err) {
+      setUploadState("error");
+      setUploadError(err.message || "Upload failed — try again");
+      showToast(err.message || "Upload failed — try again");
+    }
+  }
+
+  if (bootstrapping) {
+    return <main className="welcome-shell" />;
   }
 
   if (screen === "welcome") {
@@ -248,8 +374,37 @@ export default function WeddingMissions() {
             ))}
             {results.length === 0 && <div className="empty-search">No match yet. Try your first or last name.</div>}
           </div>
-          <button className="primary-button full" disabled={!selectedGuest} onClick={() => selectedGuest && enterGame(selectedGuest)}>That’s me <ArrowRight weight="bold" /></button>
-          <button className="text-button" onClick={() => enterGame({ name: query || "Wedding Guest", table: "Welcome desk", relation: "Guest", from: "" })}>Can’t find your name? Continue as guest</button>
+          <button className="primary-button full" disabled={!selectedGuest} onClick={() => { setVerifyError(""); setScreen("verify"); }}>That’s me <ArrowRight weight="bold" /></button>
+          <button className="text-button" onClick={() => enterAsGuest({ name: query || "Wedding Guest", table: "Welcome desk", relation: "Guest", from: "" })}>Can’t find your name? Continue as guest</button>
+        </motion.section>
+      </main>
+    );
+  }
+
+  if (screen === "verify") {
+    return (
+      <main className="lookup-shell">
+        <div className="paper-noise" />
+        <button className="back-button" onClick={() => setScreen("lookup")}><ArrowLeft /> Back</button>
+        <motion.section className="lookup-card" initial={{ opacity: 0, y: 20, rotate: -1 }} animate={{ opacity: 1, y: 0, rotate: 0 }}>
+          <div className="lookup-number">02</div>
+          <p className="eyebrow">Just to be sure it’s you</p>
+          <h2>Confirm your room</h2>
+          <p>Hi {selectedGuest?.name}! Enter your room number to claim your spot and save your progress.</p>
+          <label className="search-field">
+            <input
+              value={roomNumber}
+              onChange={(e) => setRoomNumber(e.target.value)}
+              placeholder="Room number"
+              inputMode="numeric"
+              autoFocus
+              onKeyDown={(e) => e.key === "Enter" && claimGuest()}
+            />
+          </label>
+          {verifyError && <div className="empty-search">{verifyError}</div>}
+          <button className="primary-button full" disabled={!roomNumber.trim() || claiming} onClick={claimGuest}>
+            {claiming ? "Checking…" : <>Confirm <ArrowRight weight="bold" /></>}
+          </button>
         </motion.section>
       </main>
     );
@@ -271,6 +426,7 @@ export default function WeddingMissions() {
             ) : (
               <>
                 <div className="mission-heading"><div><p className="eyebrow">Your next assignment</p><h2>Wedding missions</h2></div><span>{String((missionIndex % missions.length) + 1).padStart(2, "0")} / {String(missions.length).padStart(2, "0")}</span></div>
+                {!verified && <div className="empty-search">Browsing as a guest — find your name to earn points.</div>}
                 <div className="deck-wrap">
                   <div className="ghost-card ghost-two" /><div className="ghost-card ghost-one" />
                   <AnimatePresence mode="popLayout">
@@ -279,11 +435,11 @@ export default function WeddingMissions() {
                       <div className="mission-icon">{mission.kind === "photo" ? <Camera weight="duotone" /> : <PencilSimple weight="duotone" />}</div>
                       <h3>{mission.title}</h3><p>{mission.note}</p>
                       {mission.kind === "photo" ? (
-                        <><input ref={fileRef} className="file-input" type="file" accept="image/*" capture="environment" onChange={onFile} /><button className={uploadName ? "upload-button uploaded" : "upload-button"} onClick={() => fileRef.current?.click()}>{uploadName ? <><Check weight="bold" /> Photo ready</> : <><Camera weight="bold" /> Open camera</>}</button></>
+                        <><input ref={fileRef} className="file-input" type="file" accept="image/*,video/mp4,video/quicktime" capture="environment" onChange={onFile} /><button className={uploadState === "done" ? "upload-button uploaded" : "upload-button"} onClick={() => fileRef.current?.click()} disabled={uploadState === "uploading"}>{uploadState === "uploading" ? <>Uploading…</> : uploadState === "done" ? <><Check weight="bold" /> Photo ready</> : uploadState === "error" ? <><Camera weight="bold" /> Try again</> : <><Camera weight="bold" /> Open camera</>}</button></>
                       ) : (
                         <textarea value={answer} onChange={(e) => setAnswer(e.target.value)} placeholder="Write something they’ll want to keep…" maxLength={280} />
                       )}
-                      <button className="submit-button" onClick={submitMission} disabled={submitting}>{submitting ? "Sending…" : <>Submit for review <ArrowRight weight="bold" /></>}</button>
+                      <button className="submit-button" onClick={submitMission} disabled={submitting || (mission.kind === "photo" && uploadState !== "done")}>{submitting ? "Sending…" : <>Submit for review <ArrowRight weight="bold" /></>}</button>
                     </motion.article>
                   </AnimatePresence>
                 </div>
@@ -297,7 +453,7 @@ export default function WeddingMissions() {
           <motion.section className="content-view" key="wall" initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }}>
             <div className="section-title"><p className="eyebrow">Live from the celebration</p><h2>The wedding wall</h2><p>Approved photos, stories, and questionable advice from everyone here.</p></div>
             {posts.length === 0 && <div className="empty-search">Nothing on the wall yet — approved submissions show up here.</div>}
-            <div className="wall-grid">{posts.map((post, index) => <article className={`wall-post ${post.tone}`} key={post.id} style={{ transform: `rotate(${index % 2 ? 1 : -1}deg)` }}><div className="post-image"><span>{post.initials}</span><ImageSquare weight="thin" /></div><div className="post-copy"><small>{post.mission} · +{post.points}</small><p>{post.body}</p><div><span className="avatar small">{post.initials}</span><span><strong>{post.name}</strong><small>{post.table}</small></span></div></div></article>)}</div>
+            <div className="wall-grid">{posts.map((post, index) => <article className={`wall-post ${post.tone}`} key={post.id} style={{ transform: `rotate(${index % 2 ? 1 : -1}deg)` }}><div className="post-image">{/^https?:\/\//.test(post.mediaUrl || "") ? (post.mediaType?.startsWith("video/") ? <video src={post.mediaUrl} muted loop playsInline /> : <img src={post.mediaUrl} alt="" />) : (<><span>{post.initials}</span><ImageSquare weight="thin" /></>)}</div><div className="post-copy"><small>{post.mission} · +{post.points}</small><p>{post.body}</p><div><span className="avatar small">{post.initials}</span><span><strong>{post.name}</strong><small>{post.table}</small></span></div></div></article>)}</div>
           </motion.section>
         )}
 
@@ -310,7 +466,7 @@ export default function WeddingMissions() {
 
         {tab === "profile" && (
           <motion.section className="content-view profile-view" key="profile" initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }}>
-            <div className="profile-card"><div className="profile-portrait">{initials(selectedGuest?.name)}</div><p className="eyebrow">Guest profile</p><h2>{selectedGuest?.name}</h2><span className="table-pill">{selectedGuest?.table}</span><label>How do you know us?<input value={profile.relation} onChange={(e) => setProfile({ ...profile, relation: e.target.value })} /></label><label>Where are you from?<input value={profile.from} onChange={(e) => setProfile({ ...profile, from: e.target.value })} /></label><button className="primary-button full" onClick={() => showToast("Profile saved")}>Save profile <Check weight="bold" /></button><p className="profile-note"><UsersThree /> Other guests can see this when they open your profile on the wall.</p></div>
+            <div className="profile-card"><div className="profile-portrait">{initials(selectedGuest?.name)}</div><p className="eyebrow">Guest profile</p><h2>{selectedGuest?.name}</h2><span className="table-pill">{selectedGuest?.table}</span><label>How do you know us?<input value={profile.relation} onChange={(e) => setProfile({ ...profile, relation: e.target.value })} /></label><label>Where are you from?<input value={profile.from} onChange={(e) => setProfile({ ...profile, from: e.target.value })} /></label><button className="primary-button full" onClick={() => showToast("Profile saved")}>Save profile <Check weight="bold" /></button>{verified && <button className="text-button" onClick={switchGuest}>Not you? Switch guest</button>}<p className="profile-note"><UsersThree /> Other guests can see this when they open your profile on the wall.</p></div>
           </motion.section>
         )}
       </AnimatePresence>
