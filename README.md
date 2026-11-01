@@ -45,12 +45,19 @@ Backed by Supabase Postgres via `lib/server/wedding-repository.js`.
 | --- | --- | --- |
 | `/api/health` | GET | Deployment health check |
 | `/api/guests?q=` | GET | Guest name search (max 8) |
-| `/api/guests/{id}` | GET | Viewer bootstrap: guest, score, deck position |
-| `/api/guests/{id}/progress` | PUT | Save the guest's mission-deck position |
+| `/api/guests/{id}` | GET | Public guest lookup: guest, score, deck position (no auth) |
+| `/api/guests/{id}/claim` | POST | Verify a room number, issue the `guest_session` cookie |
+| `/api/me` | GET | Resume a returning, already-claimed guest from the cookie |
+| `/api/me/progress` | PUT | Save the session's mission-deck position |
+| `/api/me/logout` | POST | Clear the session cookie |
 | `/api/missions` | GET | Active missions (the card deck) |
 | `/api/posts` | GET | Wedding wall — approved submissions only |
-| `/api/submissions` | POST | Submit a mission answer (created as `pending`) |
+| `/api/submissions` | POST | Submit a mission answer (requires session; created as `pending`) |
 | `/api/leaderboard` | GET | Top 5 guests by points |
+
+Guest identity has no email/password: a guest picks their name, then enters
+their **room number** to claim it (`/api/guests/{id}/claim`). See
+`docs/DATABASE.md` for the full auth flow.
 
 Full request/response schemas: [`public/openapi.yaml`](public/openapi.yaml).
 Browse it as Swagger UI at `/api-docs.html` (served statically; the spec loads

@@ -1,9 +1,16 @@
 import { saveGuestProgress } from "@/lib/server/wedding-repository";
+import { getSessionGuestId } from "@/lib/server/guest-session";
 
 export const dynamic = "force-dynamic";
 
-export async function PUT(request, { params }) {
-  const { id } = await params;
+// Replaces PUT /api/guests/[id]/progress — the guest id comes from the
+// session cookie now, not the URL, so a guest can only ever save their
+// own deck position.
+export async function PUT(request) {
+  const guestId = await getSessionGuestId(request);
+  if (!guestId) {
+    return Response.json({ error: "Not signed in" }, { status: 401 });
+  }
 
   let body;
   try {
@@ -20,6 +27,6 @@ export async function PUT(request, { params }) {
     );
   }
 
-  await saveGuestProgress(id, { missionIndex });
+  await saveGuestProgress(guestId, { missionIndex });
   return Response.json({ ok: true });
 }

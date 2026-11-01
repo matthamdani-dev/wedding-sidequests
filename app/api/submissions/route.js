@@ -3,10 +3,16 @@ import {
   getGuestScore,
   RepositoryError,
 } from "@/lib/server/wedding-repository";
+import { getSessionGuestId } from "@/lib/server/guest-session";
 
 export const dynamic = "force-dynamic";
 
 export async function POST(request) {
+  const guestId = await getSessionGuestId(request);
+  if (!guestId) {
+    return Response.json({ error: "Verify your name to submit" }, { status: 401 });
+  }
+
   let body;
   try {
     body = await request.json();
@@ -15,9 +21,6 @@ export async function POST(request) {
   }
 
   try {
-    // TODO(step 3): derive guestId from the signed session cookie, not the body.
-    const guestId = body.guestId;
-
     const submission = await createSubmission({
       guestId,
       missionId: body.missionId,

@@ -24,7 +24,7 @@ evolve the schema; never edit an applied migration.
 
 ## Schema (001_init.sql)
 
-- **guests** — `name`, `phone`, generated `phone_last4`, `table`, `relation`,
+- **guests** — `name`, `phone`, `room_number`, `table`, `relation`,
   `hometown`, `claimed_at`, `session_epoch`. `id` is `text`: seed rows keep
   slugs, imported rows get a uuid. `session_epoch` is embedded in the guest
   cookie; an admin "reset claim" bumps it to invalidate outstanding cookies.
@@ -41,15 +41,22 @@ evolve the schema; never edit an applied migration.
 ## Guest auth (name claim)
 
 No email/password. During onboarding the guest picks their name, then enters
-the **last 4 digits of their phone**, checked against `guests.phone_last4`.
-On success a signed cookie (`AUTH_SECRET`) carrying `guest_id` + `session_epoch`
-is issued and `claimed_at` is set. Brute-force protection is "light touch": a
-small fixed delay per wrong attempt, hard lock on a name after ~20 failures
-(`auth_attempts.locked_until`). Guests who can't verify (name not found, no
-phone on file) get a **read-only** experience — browse missions, wall, and
-leaderboard, but no submissions or points.
+their **room number**, checked case-insensitively against `guests.room_number`
+(`POST /api/guests/{id}/claim`). On success a signed cookie (`AUTH_SECRET`,
+`guest_session`) carrying `guest_id` + `session_epoch` is issued (~72h) and
+`claimed_at` is set. Not device-locked — claiming from a second device with
+the right room number issues it its own valid session. `GET /api/me` resumes
+a returning guest from the cookie without re-verifying.
 
-The **guest CSV must include a phone column** or those guests can't self-verify.
+Throttling is "light touch": hard lock on a name after ~20 failed attempts
+(`auth_attempts.locked_until`, 2h). Guests who can't verify (name not found,
+no room number on file, or they skip via "continue as guest") get a
+**read-only** experience — browse missions, wall, and leaderboard, but
+`POST /api/submissions` and `PUT /api/me/progress` both require the session
+cookie, so they can't submit or earn points.
+
+The **guest CSV must include a room_number column** or those guests can't
+self-verify.
 
 ## Scoring
 
@@ -68,12 +75,43 @@ WHERE id = ANY($1)` / `WHERE status='pending'`).
 
 ## Upload flow (wall photos)
 
-1. Client asks a Next route for a signed upload URL (Supabase Storage,
-   `SUPABASE_WALL_BUCKET`).
-2. File uploads directly to the bucket.
-3. The returned object URL is submitted with the mission answer.
+1. Client asks `POST /api/uploads` (filename, contentType, sizeBytes; requires
+   a guest session) for a signed upload URL (Supabase Storage,
+   `SUPABASE_WALL_BUCKET`, `lib/server/storage.js`). The route rejects
+   unsupported types and files over the size cap before ever contacting
+   Storage.
+2. File uploads directly to the bucket via `PUT <uploadUrl>` with the file's
+   `Content-Type` header — the Next server never sees the file bytes.
+3. The returned public object URL (`publicUrl`) is submitted with the
+   mission answer as `mediaUrl`/`mediaType`.
 4. Server validates guest session, mission, file type/size, sets `media_url`
    and the `points` snapshot, inserts `status = 'pending'`.
+
+Allowed content types: `image/jpeg`, `image/png`, `image/webp`, `image/heic`,
+`video/mp4`, `video/quicktime`. Size caps: 15MB for photos, 60MB for video
+(enforced both client-side before upload and server-side in
+`POST /api/uploads`) — generous enough for a phone photo/HEIC shot or a short
+1080p clip, small enough to not choke venue wifi.
+
+### Supabase Storage setup (manual — not scriptable from here)
+
+The bucket must be created by hand in the Supabase dashboard; there's no
+service-role key in this environment to do it from code.
+
+1. **Storage → New bucket**, name it to match `SUPABASE_WALL_BUCKET`
+   (default `wall-media`).
+2. Mark it **public**. Wedding wall photos aren't sensitive, and public-read
+   means the stored `publicUrl` works immediately for `<img>`/`<video>` tags
+   and the wall feed with no per-request signing — simpler than
+   private+signed-read for a one-night, low-stakes app. (Uploads themselves
+   still go through a one-time signed *upload* URL from the service-role
+   key, so random clients still can't write to the bucket — only reads are
+   public.)
+3. Fill in `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` (Project Settings →
+   API) in both `.env.local` (local dev) and the Vercel project's
+   Environment Variables (for every deployed environment this app uses).
+   `SUPABASE_WALL_BUCKET` only needs setting if the bucket name differs from
+   the default `wall-media`.
 
 ## Backoffice (admin)
 

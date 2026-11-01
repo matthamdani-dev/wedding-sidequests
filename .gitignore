@@ -2,6 +2,7 @@ node_modules/
 .next/
 .vercel/
 out/
+.claude/
 .env
 .env.local
 .env.*.local

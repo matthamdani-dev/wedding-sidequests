@@ -1,18 +1,28 @@
 openapi: 3.1.0
 info:
   title: Wedding Missions API
-  version: 0.1.0
+  version: 0.2.0
   description: >
     HTTP API for the wedding missions app. All routes live under `/api` and are
     served by Next.js route handlers backed by Supabase Postgres
     (`lib/server/wedding-repository.js`).
 
 
-    **Not yet implemented** (tracked separately): guest session auth
-    (last-4-digits name claim -> signed cookie), photo upload signed URLs, and
-    the `/api/admin/*` backoffice (CSV import, moderation). `guestId` is
-    currently taken from the request body; step 3 moves it to the session
-    cookie.
+    **Guest auth**: no email/password. A guest picks their name (`GET
+    /api/guests`), then claims it with their room number (`POST
+    /api/guests/{id}/claim`). On success the server issues a signed, httpOnly
+    `guest_session` cookie; `GET /api/me` resumes a returning guest from it.
+    Submitting (`POST /api/submissions`) and saving deck progress (`PUT
+    /api/me/progress`) both require this cookie — there is no unverified path
+    into either. A guest who skips verification ("continue as guest" in the
+    UI) can browse but not submit.
+
+
+    **Not yet implemented** (tracked separately): real photo/video upload
+    (clients currently send a `pending-upload:<filename>` placeholder for
+    `mediaUrl`) and the `/api/admin/*` backoffice (CSV import, moderation).
+  license:
+    name: UNLICENSED
 servers:
   - url: /
     description: Same origin as the docs page
@@ -23,6 +33,7 @@ tags:
   - name: System
   - name: Missions
   - name: Guests
+  - name: Session
   - name: Wall
   - name: Leaderboard
 
@@ -89,7 +100,10 @@ paths:
   /api/guests/{id}:
     get:
       tags: [Guests]
-      summary: Viewer bootstrap — guest record, score, and deck position
+      summary: Public guest lookup — record, score, and deck position
+      description: >
+        No auth required; used to show a guest's basic info before they've
+        claimed their name. Does not require or imply a session.
       parameters:
         - $ref: "#/components/parameters/GuestId"
       responses:
@@ -110,12 +124,101 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
 
-  /api/guests/{id}/progress:
-    put:
-      tags: [Guests]
-      summary: Save the guest's position in the mission deck
+  /api/guests/{id}/claim:
+    post:
+      tags: [Session]
+      summary: Verify a guest's room number and claim their name
+      description: >
+        Checks `roomNumber` against the guest's `room_number`. On success,
+        sets the `guest_session` cookie (httpOnly, ~72h) and returns the same
+        bootstrap shape as `GET /api/me`, so the client can enter the game
+        immediately without a second request. Not device-locked — claiming
+        from a second device with the correct room number issues it its own
+        valid session.
+
+
+        Throttled: 20 failed attempts locks the guest for 2 hours
+        (`401` while guessing, `429` once locked).
       parameters:
         - $ref: "#/components/parameters/GuestId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [roomNumber]
+              properties:
+                roomNumber:
+                  type: string
+                  description: Matched case-insensitively, trimmed.
+                  example: "214"
+      responses:
+        "200":
+          description: Verified — session cookie set
+          headers:
+            Set-Cookie:
+              schema: { type: string }
+              description: guest_session=...; HttpOnly; SameSite=Lax; Max-Age=259200
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [guest, score, progress]
+                properties:
+                  guest: { $ref: "#/components/schemas/GuestWithClaim" }
+                  score: { $ref: "#/components/schemas/Score" }
+                  progress: { $ref: "#/components/schemas/Progress" }
+        "400":
+          description: Missing roomNumber or invalid JSON
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "401":
+          description: Room number doesn't match
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "404":
+          description: No guest with that id
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "429":
+          description: Too many failed attempts — locked for 2 hours
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /api/me:
+    get:
+      tags: [Session]
+      summary: Resume a returning, already-claimed guest
+      description: Reads the guest_session cookie. Used on app load to skip straight to the game screen without re-verifying.
+      security: [{ guestSession: [] }]
+      responses:
+        "200":
+          description: Valid session
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [guest, score, progress]
+                properties:
+                  guest: { $ref: "#/components/schemas/GuestWithClaim" }
+                  score: { $ref: "#/components/schemas/Score" }
+                  progress: { $ref: "#/components/schemas/Progress" }
+        "401":
+          description: Missing, expired, forged, or invalidated session (e.g. after an admin claim reset)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /api/me/progress:
+    put:
+      tags: [Session]
+      summary: Save the current session's position in the mission deck
+      security: [{ guestSession: [] }]
       requestBody:
         required: true
         content:
@@ -142,6 +245,29 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
+        "401":
+          description: No valid session
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /api/me/logout:
+    post:
+      tags: [Session]
+      summary: Clear the session cookie
+      responses:
+        "200":
+          description: Logged out
+          headers:
+            Set-Cookie:
+              schema: { type: string }
+              description: guest_session=; Max-Age=0
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean, example: true }
 
   /api/posts:
     get:
@@ -168,23 +294,21 @@ paths:
       tags: [Wall]
       summary: Submit a mission answer
       description: >
-        Creates a submission with `status = 'pending'`. Points count toward the
-        guest's total immediately (the leaderboard sums everything not
-        rejected); an admin rejection later deducts them. `body` is required for
-        `text` missions, `mediaUrl` for `photo` missions.
+        Requires a valid guest_session cookie — the guest id is taken from
+        the session, never from the request body. Creates a submission with
+        `status = 'pending'`. Points count toward the guest's total
+        immediately (the leaderboard sums everything not rejected); an admin
+        rejection later deducts them. `body` is required for `text` missions,
+        `mediaUrl` for `photo` missions.
+      security: [{ guestSession: [] }]
       requestBody:
         required: true
         content:
           application/json:
             schema:
               type: object
-              required: [guestId, missionId]
+              required: [missionId]
               properties:
-                guestId:
-                  type: string
-                  description: >
-                    Currently supplied by the client. Step 3 will derive this
-                    from the signed guest session cookie and ignore the body.
                 missionId: { type: integer }
                 body:
                   type: [string, "null"]
@@ -209,9 +333,12 @@ paths:
                   submission: { $ref: "#/components/schemas/SubmissionResult" }
                   score: { $ref: "#/components/schemas/Score" }
         "400":
-          description: >
-            Invalid JSON, missing/unknown guest, unknown or inactive mission, or
-            missing content for the mission kind.
+          description: Invalid JSON, unknown or inactive mission, or missing content for the mission kind.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "401":
+          description: No valid session — guest hasn't verified their name
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
@@ -242,6 +369,13 @@ paths:
                     items: { $ref: "#/components/schemas/LeaderboardEntry" }
 
 components:
+  securitySchemes:
+    guestSession:
+      type: apiKey
+      in: cookie
+      name: guest_session
+      description: Signed, httpOnly cookie set by POST /api/guests/{id}/claim.
+
   parameters:
     GuestId:
       name: id
@@ -272,7 +406,7 @@ components:
             claimedAt:
               type: [string, "null"]
               format: date-time
-              description: When the guest verified their name, or null if unclaimed.
+              description: When the guest verified their room number, or null if unclaimed.
 
     Mission:
       type: object
