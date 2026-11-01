@@ -34,9 +34,15 @@ evolve the schema; never edit an applied migration.
 - **submissions** — one guest's answer to one mission. `body` (text answer)
   and/or `media_url` (photo in Supabase Storage), `points` snapshot,
   `status` (`pending`|`approved`|`rejected`), `reviewed_at`.
-- **guest_scores** (view) — leaderboard. `points = SUM(points) WHERE status <> 'rejected'`.
-- **auth_attempts** — throttles the last-4-digits claim check.
+- **guest_scores** (view) — leaderboard. `points = SUM(submissions.points WHERE
+  status <> 'rejected') + SUM(point_adjustments.points)`.
+- **auth_attempts** — throttles the room-number claim check.
 - **guest_progress** — per-guest card position in the deck (UI convenience).
+- **point_adjustments** (003) — admin-granted bonus points unrelated to any
+  mission (e.g. "best dressed"). `points` (can be negative, to correct a
+  mistake), `note` (required — shown in the points history), `created_at`.
+  Kept separate from `submissions` since these aren't guest-authored content
+  and need no moderation.
 
 ## Guest auth (name claim)
 
@@ -68,10 +74,20 @@ guest-facing endpoint.
 ## Wall + moderation
 
 Every submission starts `pending`. The public wall query returns
-`status = 'approved'` only. The backoffice lists submissions by status with
-checkbox multi-select, plus **"Approve selected"** and **"Approve all pending"**
-bulk actions (`UPDATE submissions SET status='approved', reviewed_at=now()
-WHERE id = ANY($1)` / `WHERE status='pending'`).
+`status = 'approved'` only. The backoffice's Review tab has two views:
+
+- **Swipe deck** (default, mobile-friendly) — one pending submission at a
+  time; swipe right to approve, left to reject, or use the on-screen buttons.
+  Built with `motion`'s drag gesture (`PATCH /api/admin/submissions/{id}`).
+- **List view** — all submissions for a status, with checkbox multi-select
+  and **"Approve selected"** / **"Approve all pending"** bulk actions
+  (`POST /api/admin/submissions/bulk`, `UPDATE ... WHERE id = ANY($1)` /
+  `WHERE status = 'pending'`).
+
+Either view can also **permanently delete** a submission
+(`DELETE /api/admin/submissions/{id}`) for genuinely bad content — distinct
+from reject, which keeps the row (and the audit trail) but excludes it from
+scoring. Delete also best-effort removes the uploaded file from Storage.
 
 ## Upload flow (wall photos)
 
@@ -115,9 +131,28 @@ service-role key in this environment to do it from code.
 
 ## Backoffice (admin)
 
-Separate path (`app/(admin)/…`, `app/api/admin/…`), guarded by middleware and
-its own session cookie. **Single admin account** from env — `ADMIN_USERNAME` +
-`ADMIN_PASSWORD_HASH` (bcrypt); no `admin_users` table. Functions: CSV import
-for guests and missions (**upsert, never delete** — match guests on phone then
-name+table, missions on id/title; validate → dry-run preview → commit),
-submission moderation, reset a guest's claim, manual points adjustment.
+`app/admin/page.js` (one route — a server component that checks the
+`admin_session` cookie and renders `AdminLogin` or `AdminDashboard`) plus
+`app/api/admin/*`. **Single shared admin account** from env —
+`ADMIN_USERNAME` + `ADMIN_PASSWORD_HASH` (bcrypt, see `.env.example` for the
+`$`-escaping gotcha in local `.env` files); no `admin_users` table, so there's
+no per-admin identity or audit trail by design.
+
+No middleware: each `/api/admin/*` route checks `requireAdmin(request)`
+itself (`lib/server/admin-session.js`), the same per-route pattern the guest
+session uses — avoids relying on Node APIs (`node:crypto`) inside Next's
+Edge-runtime middleware.
+
+Three tabs in the dashboard:
+
+- **Review** — submission moderation (swipe deck + list), described above.
+- **Missions** — full CRUD. Deleting a mission with existing submissions is
+  blocked (`409`, FK `ON DELETE RESTRICT`) with a prompt to mark it inactive
+  instead.
+- **Guests** — full CRUD (add/edit/delete; this is also how guests get into
+  the system at all beyond the local seed script — there's no CSV import in
+  this pass), **Add points** (opens a form asking the amount and a required
+  note, `POST /api/admin/guests/{id}/points`), and **Reset claim**
+  (`POST /api/admin/guests/{id}/reset-claim` — bumps `session_epoch` and
+  clears `claimed_at`, invalidating every outstanding `guest_session` cookie
+  for that guest without touching their name or score history).
