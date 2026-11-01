@@ -53,6 +53,7 @@ export default function WeddingMissions() {
   const [uploadError, setUploadError] = useState("");
   const [mediaUrl, setMediaUrl] = useState(null);
   const [mediaType, setMediaType] = useState(null);
+  const [previewUrl, setPreviewUrl] = useState(null);
   const [points, setPoints] = useState(0);
   const [pendingCount, setPendingCount] = useState(0);
   const [posts, setPosts] = useState([]);
@@ -217,6 +218,10 @@ export default function WeddingMissions() {
     setUploadError("");
     setMediaUrl(null);
     setMediaType(null);
+    setPreviewUrl((prev) => {
+      if (prev) URL.revokeObjectURL(prev);
+      return null;
+    });
   }
 
   function showToast(message) {
@@ -252,7 +257,7 @@ export default function WeddingMissions() {
       }
       setPoints(data.score?.points ?? points + mission.points);
       setPendingCount(data.score?.pendingCount ?? pendingCount + 1);
-      showToast(`+${mission.points} points · sent for review`);
+      showToast(`+${mission.points} points · Submitted!`);
       nextMission();
     } catch {
       showToast("Network hiccup — try again");
@@ -293,6 +298,10 @@ export default function WeddingMissions() {
     setUploadError("");
     setMediaUrl(null);
     setMediaType(null);
+    setPreviewUrl((prev) => {
+      if (prev) URL.revokeObjectURL(prev);
+      return URL.createObjectURL(file);
+    });
 
     try {
       const res = await fetch("/api/uploads", {
@@ -435,11 +444,22 @@ export default function WeddingMissions() {
                       <div className="mission-icon">{mission.kind === "photo" ? <Camera weight="duotone" /> : <PencilSimple weight="duotone" />}</div>
                       <h3>{mission.title}</h3><p>{mission.note}</p>
                       {mission.kind === "photo" ? (
-                        <><input ref={fileRef} className="file-input" type="file" accept="image/*,video/mp4,video/quicktime" capture="environment" onChange={onFile} /><button className={uploadState === "done" ? "upload-button uploaded" : "upload-button"} onClick={() => fileRef.current?.click()} disabled={uploadState === "uploading"}>{uploadState === "uploading" ? <>Uploading…</> : uploadState === "done" ? <><Check weight="bold" /> Photo ready</> : uploadState === "error" ? <><Camera weight="bold" /> Try again</> : <><Camera weight="bold" /> Open camera</>}</button></>
+                        <>
+                          <input ref={fileRef} className="file-input" type="file" accept="image/*,video/mp4,video/quicktime" capture="environment" onChange={onFile} />
+                          {previewUrl && (
+                            <div className="photo-preview">
+                              {mediaType?.startsWith("video/") ? <video src={previewUrl} muted loop playsInline autoPlay /> : <img src={previewUrl} alt="" />}
+                              {uploadState === "uploading" && <span className="photo-preview-status">Uploading…</span>}
+                            </div>
+                          )}
+                          <button className={uploadState === "done" ? "upload-button uploaded" : "upload-button"} onClick={() => fileRef.current?.click()} disabled={uploadState === "uploading"}>
+                            {uploadState === "uploading" ? <>Uploading…</> : uploadState === "done" ? <><Check weight="bold" /> Retake / choose another</> : uploadState === "error" ? <><Camera weight="bold" /> Try again</> : <><Camera weight="bold" /> Open camera</>}
+                          </button>
+                        </>
                       ) : (
                         <textarea value={answer} onChange={(e) => setAnswer(e.target.value)} placeholder="Write something they’ll want to keep…" maxLength={280} />
                       )}
-                      <button className="submit-button" onClick={submitMission} disabled={submitting || (mission.kind === "photo" && uploadState !== "done")}>{submitting ? "Sending…" : <>Submit for review <ArrowRight weight="bold" /></>}</button>
+                      <button className="submit-button" onClick={submitMission} disabled={submitting || (mission.kind === "photo" && uploadState !== "done")}>{submitting ? "Sending…" : <>Submit <ArrowRight weight="bold" /></>}</button>
                     </motion.article>
                   </AnimatePresence>
                 </div>

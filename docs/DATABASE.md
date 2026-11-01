@@ -66,15 +66,23 @@ self-verify.
 
 ## Scoring
 
-Points apply the moment a guest submits (`status = 'pending'`). An admin
+Points apply the moment a guest submits, regardless of status. An admin
 rejection deducts them (row moves to `rejected`, dropped from the view's sum).
-`approved` / `rejected` are **admin-only** states — never returned by any
-guest-facing endpoint.
+`pending` / `approved` / `rejected` are **admin-only** states — never
+returned by any guest-facing endpoint (the guest UI never mentions review or
+moderation at all; see below).
 
 ## Wall + moderation
 
-Every submission starts `pending`. The public wall query returns
-`status = 'approved'` only. The backoffice's Review tab has two views:
+Only **photo** submissions need a human look — they're the only kind that
+can show something off-brand on the wall, so they start `status = 'pending'`.
+**Text** submissions auto-approve immediately (`status = 'approved'` on
+insert, no `reviewed_at`) since there's nothing to moderate there; this also
+keeps the admin Review queue to just photos. The public wall query returns
+`status = 'approved'` only, so text submissions appear on the wall instantly
+while photos wait for approval.
+
+The backoffice's Review tab has two views:
 
 - **Swipe deck** (default, mobile-friendly) — one pending submission at a
   time; swipe right to approve, left to reject, or use the on-screen buttons.

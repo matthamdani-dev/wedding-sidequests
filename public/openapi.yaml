@@ -302,9 +302,11 @@ paths:
       summary: Submit a mission answer
       description: >
         Requires a valid guest_session cookie — the guest id is taken from
-        the session, never from the request body. Creates a submission with
-        `status = 'pending'`. Points count toward the guest's total
-        immediately (the leaderboard sums everything not rejected); an admin
+        the session, never from the request body. Photo missions are created
+        `status = 'pending'` (await admin review); text missions auto-approve
+        immediately (`status = 'approved'`) since there's nothing to
+        moderate. Points count toward the guest's total immediately either
+        way (the leaderboard sums everything not rejected); an admin
         rejection later deducts them. `body` is required for `text` missions,
         `mediaUrl` for `photo` missions.
       security: [{ guestSession: [] }]
