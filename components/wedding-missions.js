@@ -417,7 +417,7 @@ export default function WeddingMissions() {
               value={roomNumber}
               onChange={(e) => setRoomNumber(e.target.value)}
               placeholder="Room number"
-              inputMode="numeric"
+              autoCapitalize="characters"
               autoFocus
               onKeyDown={(e) => e.key === "Enter" && claimGuest()}
             />
