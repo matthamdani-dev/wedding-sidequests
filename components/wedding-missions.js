@@ -30,6 +30,18 @@ function initials(name) {
     .toUpperCase();
 }
 
+// Guests are often entered as a bare table number ("8", "12A") via the
+// admin dashboard — prefix those with "Table " for display. Leaves
+// anything already labeled ("Table 8") or descriptive ("Welcome desk",
+// "Sweet Pea · 01") untouched so it doesn't get double- or mis-prefixed.
+function formatTable(table) {
+  if (!table) return table;
+  const trimmed = table.trim();
+  if (/^table\b/i.test(trimmed)) return trimmed;
+  if (/^\d+[a-z]?$/i.test(trimmed)) return `Table ${trimmed}`;
+  return trimmed;
+}
+
 export default function WeddingMissions() {
   const reduceMotion = useReducedMotion();
   const [bootstrapping, setBootstrapping] = useState(true);
@@ -378,7 +390,7 @@ export default function WeddingMissions() {
           <div className="guest-results">
             {results.slice(0, 4).map((guest) => (
               <button key={guest.id} className={selectedGuest?.id === guest.id ? "guest-row selected" : "guest-row"} onClick={() => setSelectedGuest(guest)}>
-                <span className="avatar">{initials(guest.name)}</span><span><strong>{guest.name}</strong><small>{guest.table}</small></span>{selectedGuest?.id === guest.id && <Check weight="bold" />}
+                <span className="avatar">{initials(guest.name)}</span><span><strong>{guest.name}</strong><small>{formatTable(guest.table)}</small></span>{selectedGuest?.id === guest.id && <Check weight="bold" />}
               </button>
             ))}
             {results.length === 0 && <div className="empty-search">No match yet. Try your first or last name.</div>}
@@ -423,7 +435,7 @@ export default function WeddingMissions() {
     <main className="app-shell">
       <header className="app-header">
         <button className="brand" onClick={() => setTab("missions")}><span>N</span><i>&</i><span>M</span></button>
-        <div className="guest-chip"><span>{initials(selectedGuest?.name)}</span><div><small>{selectedGuest?.table}</small><strong>{selectedGuest?.name}</strong></div></div>
+        <div className="guest-chip"><span>{initials(selectedGuest?.name)}</span><div><small>{formatTable(selectedGuest?.table)}</small><strong>{selectedGuest?.name}</strong></div></div>
         <div className="points"><Sparkle weight="fill" /> {points} pts</div>
       </header>
 
@@ -473,7 +485,7 @@ export default function WeddingMissions() {
           <motion.section className="content-view" key="wall" initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }}>
             <div className="section-title"><p className="eyebrow">Live from the celebration</p><h2>The wedding wall</h2><p>Approved photos, stories, and questionable advice from everyone here.</p></div>
             {posts.length === 0 && <div className="empty-search">Nothing on the wall yet — approved submissions show up here.</div>}
-            <div className="wall-grid">{posts.map((post, index) => <article className={`wall-post ${post.tone}`} key={post.id} style={{ transform: `rotate(${index % 2 ? 1 : -1}deg)` }}><div className="post-image">{/^https?:\/\//.test(post.mediaUrl || "") ? (post.mediaType?.startsWith("video/") ? <video src={post.mediaUrl} muted loop playsInline /> : <img src={post.mediaUrl} alt="" />) : (<><span>{post.initials}</span><ImageSquare weight="thin" /></>)}</div><div className="post-copy"><small>{post.mission} · +{post.points}</small><p>{post.body}</p><div><span className="avatar small">{post.initials}</span><span><strong>{post.name}</strong><small>{post.table}</small></span></div></div></article>)}</div>
+            <div className="wall-grid">{posts.map((post, index) => <article className={`wall-post ${post.tone}`} key={post.id} style={{ transform: `rotate(${index % 2 ? 1 : -1}deg)` }}><div className="post-image">{/^https?:\/\//.test(post.mediaUrl || "") ? (post.mediaType?.startsWith("video/") ? <video src={post.mediaUrl} muted loop playsInline /> : <img src={post.mediaUrl} alt="" />) : (<><span>{post.initials}</span><ImageSquare weight="thin" /></>)}</div><div className="post-copy"><small>{post.mission} · +{post.points}</small><p>{post.body}</p><div><span className="avatar small">{post.initials}</span><span><strong>{post.name}</strong><small>{formatTable(post.table)}</small></span></div></div></article>)}</div>
           </motion.section>
         )}
 
@@ -486,7 +498,7 @@ export default function WeddingMissions() {
 
         {tab === "profile" && (
           <motion.section className="content-view profile-view" key="profile" initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }}>
-            <div className="profile-card"><div className="profile-portrait">{initials(selectedGuest?.name)}</div><p className="eyebrow">Guest profile</p><h2>{selectedGuest?.name}</h2><span className="table-pill">{selectedGuest?.table}</span><label>How do you know us?<input value={profile.relation} onChange={(e) => setProfile({ ...profile, relation: e.target.value })} /></label><label>Where are you from?<input value={profile.from} onChange={(e) => setProfile({ ...profile, from: e.target.value })} /></label><button className="primary-button full" onClick={() => showToast("Profile saved")}>Save profile <Check weight="bold" /></button>{verified && <button className="text-button" onClick={switchGuest}>Not you? Switch guest</button>}<p className="profile-note"><UsersThree /> Other guests can see this when they open your profile on the wall.</p></div>
+            <div className="profile-card"><div className="profile-portrait">{initials(selectedGuest?.name)}</div><p className="eyebrow">Guest profile</p><h2>{selectedGuest?.name}</h2><span className="table-pill">{formatTable(selectedGuest?.table)}</span><label>How do you know us?<input value={profile.relation} onChange={(e) => setProfile({ ...profile, relation: e.target.value })} /></label><label>Where are you from?<input value={profile.from} onChange={(e) => setProfile({ ...profile, from: e.target.value })} /></label><button className="primary-button full" onClick={() => showToast("Profile saved")}>Save profile <Check weight="bold" /></button>{verified && <button className="text-button" onClick={switchGuest}>Not you? Switch guest</button>}<p className="profile-note"><UsersThree /> Other guests can see this when they open your profile on the wall.</p></div>
           </motion.section>
         )}
       </AnimatePresence>
