@@ -356,7 +356,7 @@ export default function WeddingMissions() {
         <motion.div className="date-stamp" initial={{ opacity: 0, y: -12 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: .25 }}>10—12 NOV 2026 · YARRA VALLEY</motion.div>
         <section className="welcome-grid">
           <motion.div className="portrait portrait-left" initial={{ opacity: 0, rotate: -12, x: -30 }} animate={{ opacity: 1, rotate: -6, x: 0 }} transition={{ duration: .8, ease: [0.2, 0.8, 0.2, 1] }}>
-            <div className="photo-placeholder photo-n">N</div><span>the bride</span>
+            <div className="photo-placeholder photo-real"><img src="/photos/bride-photo.jpeg" alt="Nadya" /></div><span>the bride</span>
           </motion.div>
           <motion.div className="welcome-copy" initial={{ opacity: 0, y: 24 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: .12, duration: .8 }}>
             <p className="eyebrow">You are cordially invited to cause</p>
@@ -368,7 +368,7 @@ export default function WeddingMissions() {
             <p className="tiny-note">A wedding game made for our favourite people</p>
           </motion.div>
           <motion.div className="portrait portrait-right" initial={{ opacity: 0, rotate: 12, x: 30 }} animate={{ opacity: 1, rotate: 5, x: 0 }} transition={{ delay: .08, duration: .8, ease: [0.2, 0.8, 0.2, 1] }}>
-            <div className="photo-placeholder photo-m">M</div><span>the groom</span>
+            <div className="photo-placeholder photo-real"><img src="/photos/groom-photo.jpeg" alt="Matthew" /></div><span>the groom</span>
           </motion.div>
         </section>
         <motion.div className="scroll-cue" animate={reduceMotion ? {} : { y: [0, 5, 0] }} transition={{ repeat: Infinity, duration: 2 }}>Begin here <span>↓</span></motion.div>
